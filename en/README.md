@@ -8,7 +8,7 @@ A practical, experience-based series on recommender system architecture and engi
 
 ## Status
 
-English translations are planned; no English articles are available yet. Chinese originals are available for architecture articles 01–14 and two engineering articles.
+English translations are planned; no English articles are available yet. Chinese originals are available for architecture articles 01–15 and two engineering articles.
 
 The tables below track planned translations of the current Chinese articles. Links in the **Original (中文)** column lead to Chinese content. English titles will link to translations as they become available. Both series are ongoing.
 
@@ -37,6 +37,7 @@ The tables below track planned translations of the current Chinese articles. Lin
 | 12  | Real-time Recommendation Engine                    | Planned            | [实时推荐引擎](../zh/architecture/12-engine.md)                        |
 | 13  | Multi-channel Recall                               | Planned            | [多路召回](../zh/architecture/13-recall.md)                          |
 | 14  | Ranking and Prediction Server                      | Planned            | [精排与 Prediction Server](../zh/architecture/14-ranking.md)        |
+| 15  | Reranking: List-Level Optimization under Multiple Constraints      | Planned            | [重排，多重约束下的列表级优化](../zh/architecture/15-rerank.md)        |
 
 ### Engineering Practice Series
 
