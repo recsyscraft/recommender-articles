@@ -8,7 +8,7 @@ A practical, experience-based series on recommender system architecture and engi
 
 ## Status
 
-English translations are planned; no English articles are available yet. Chinese originals are available for architecture articles 01–15 and two engineering articles.
+English translations are planned; no English articles are available yet. Chinese originals are available for architecture articles 01–16 and two engineering articles.
 
 The tables below track planned translations of the current Chinese articles. Links in the **Original (中文)** column lead to Chinese content. English titles will link to translations as they become available. Both series are ongoing.
 
@@ -38,6 +38,7 @@ The tables below track planned translations of the current Chinese articles. Lin
 | 13  | Multi-channel Recall                               | Planned            | [多路召回](../zh/architecture/13-recall.md)                          |
 | 14  | Ranking and Prediction Server                      | Planned            | [精排与 Prediction Server](../zh/architecture/14-ranking.md)        |
 | 15  | Reranking: List-Level Optimization under Multiple Constraints      | Planned            | [重排，多重约束下的列表级优化](../zh/architecture/15-rerank.md)        |
+| 16  | Multi-Layer Experimentation Framework: Orthogonal Reuse of Online Traffic | Planned | [多层实验框架，在线流量的正交复用](../zh/architecture/16-expframework.md) |
 
 ### Engineering Practice Series
 
