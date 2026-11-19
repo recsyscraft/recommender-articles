@@ -1,6 +1,6 @@
 # Recommender Systems: Architecture & Engineering
 
-A practical series on recommender system architecture and engineering by Huang Hui, based on experience building large-scale production systems. Topics span offline data and feature pipelines, online retrieval and ranking, and the engineering decisions that connect them.
+A practical series on recommender system architecture and engineering by Huang Hui, based on experience building large-scale production systems. Topics span offline data and feature pipelines, online retrieval and ranking, and the engineering decisions that connect them. The 18-part architecture series is now complete.
 
 基于大规模推荐系统生产实践，系统梳理从离线数据与特征生产，到在线召回、排序与工程实现的核心链路。
 
@@ -15,10 +15,10 @@ A practical series on recommender system architecture and engineering by Huang H
 
 | Series | Chinese content | English translations |
 | --- | --- | --- |
-| Architecture | 16 completed articles | Planned; none available yet |
+| Architecture | 18 articles; series complete | [01 available](./en/architecture/01-overview.md); others planned |
 | Engineering | 2 articles available; series ongoing | Planned; none available yet |
 
-Start with the [Chinese reading guide](./zh/README.md) or browse the [English translation roadmap](./en/README.md). Both series will continue to grow.
+Start with the [Chinese reading guide](./zh/README.md) or browse the [English translation roadmap](./en/README.md). The architecture series is complete; the engineering practice series is still growing.
 
 ## Repository Structure
 
@@ -31,7 +31,7 @@ Start with the [Chinese reading guide](./zh/README.md) or browse the [English tr
 │   └── engineering/         ← Chinese engineering practice articles
 ├── en/
 │   ├── README.md            ← English index & reading guide
-│   ├── architecture/        ← English architecture articles (planned)
+│   ├── architecture/        ← English architecture articles (01 available, rest planned)
 │   └── engineering/         ← English engineering articles (planned)
 ├── assets/
 │   ├── architecture/        ← Images & diagrams
@@ -40,7 +40,7 @@ Start with the [Chinese reading guide](./zh/README.md) or browse the [English tr
 └── LICENSE-MIT              ← License for source code (if any)
 ```
 
-The empty English article directories shown above are planned and will appear in Git when translations are added.
+The English directory currently holds the translation of article 01; the remaining folders and files will appear in Git as translations are added.
 
 ## License
 
