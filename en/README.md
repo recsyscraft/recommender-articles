@@ -8,9 +8,9 @@ A practical, experience-based series on recommender system architecture and engi
 
 ## Status
 
-English translations are planned; no English articles are available yet. Chinese originals are available for architecture articles 01–16 and two engineering articles.
+One English translation is published so far (Architecture 01). The Chinese originals of all 18 architecture articles and the 2 engineering articles are available.
 
-The tables below track planned translations of the current Chinese articles. Links in the **Original (中文)** column lead to Chinese content. English titles will link to translations as they become available. Both series are ongoing.
+The tables below track translations of the current Chinese articles. Links in the **Original (中文)** column lead to Chinese content; English titles link to translations where they exist, and are marked planned otherwise. The architecture series is complete; the engineering practice series is still growing.
 
 ## Reading Guide
 
@@ -23,7 +23,7 @@ The tables below track planned translations of the current Chinese articles. Lin
 
 | #   | Title                                              | Translation status | Original (中文)                                                    |
 | --- | -------------------------------------------------- | ------------------ | ---------------------------------------------------------------- |
-| 01  | Recommender System Architecture Overview           | Planned            | [推荐系统架构全景](../zh/architecture/01-overview.md)                    |
+| 01  | [Recommender System Architecture (1): The Big Picture](./architecture/01-overview.md) | Available            | [推荐系统架构全景](../zh/architecture/01-overview.md)                    |
 | 02  | Engineering Evolution of Recommendation Algorithms | Planned            | [推荐算法的工程演进](../zh/architecture/02-algo.md)                       |
 | 03  | Feature Engineering                                | Planned            | [特征工程](../zh/architecture/03-feature.md)                         |
 | 04  | Offline System Overview                            | Planned            | [离线系统总览](../zh/architecture/04-offline.md)                       |
@@ -35,10 +35,12 @@ The tables below track planned translations of the current Chinese articles. Lin
 | 10  | Online System Overview                             | Planned            | [在线系统总览](../zh/architecture/10-online.md)                        |
 | 11  | Traffic Splitter                                   | Planned            | [Traffic Splitter](../zh/architecture/11-traffic.md)             |
 | 12  | Real-time Recommendation Engine                    | Planned            | [实时推荐引擎](../zh/architecture/12-engine.md)                        |
-| 13  | Multi-channel Recall                               | Planned            | [多路召回](../zh/architecture/13-recall.md)                          |
+| 13  | Multi-channel Retrieval                               | Planned            | [多路召回](../zh/architecture/13-recall.md)                          |
 | 14  | Ranking and Prediction Server                      | Planned            | [精排与 Prediction Server](../zh/architecture/14-ranking.md)        |
 | 15  | Reranking: List-Level Optimization under Multiple Constraints      | Planned            | [重排，多重约束下的列表级优化](../zh/architecture/15-rerank.md)        |
 | 16  | Multi-Layer Experimentation Framework: Orthogonal Reuse of Online Traffic | Planned | [多层实验框架，在线流量的正交复用](../zh/architecture/16-expframework.md) |
+| 17  | Feeder: Bridging Offline and Online Systems | Planned | [Feeder，离线和在线系统的桥梁](../zh/architecture/17-feeder.md) |
+| 18  | Recommender System Architecture (18): A Decade of Engineering Evolution | Planned | [推荐系统十年的工程演进](../zh/architecture/18-evolution.md) |
 
 ### Engineering Practice Series
 
@@ -51,6 +53,7 @@ The tables below track planned translations of the current Chinese articles. Lin
 
 **Huang Hui** — A backend architect specializing in recommender systems and content distribution, with nearly two decades of server-side development and system design experience. Previously a Principal Software Engineer at Microsoft, he has also held core engineering and technical leadership roles at NIO, Cheetah Mobile, Yahoo!, and Baidu, focusing on search, recommendation systems, and distributed platform architecture.
 
+- Email: hhflying@gmail.com or hhflying@163.com
 - Personal site: [huanghui.net](https://huanghui.net/)
 - GitHub: [@hhflying](https://github.com/hhflying)
 
