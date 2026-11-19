@@ -42,35 +42,43 @@ Processor 是最小业务执行单元，所有的 Processor 类都继承自基�
 public abstract class Processor {
     public abstract Response process(ExecutionContext context);
     public Response callNextProcessor(ExecutionContext context) {
-        return context.getExecution().execute(context, this);
+        return context.getExecution().executeNext(context);
     }
 }
 
 public class CacheProcessor extends Processor {
     @Override
     public Response process(ExecutionContext context) {
-        // Pre-processing: 前置处理 - 读取缓存，可以快速短路
-        String userId = context.getRequest().getParameter("user_id");
-        Result result = CacheManager.getInstance().getUserData(userId);
-        if (result != null) {
-            return ResponseBuilder.buildSuccessResponse(result);
+        // 配置已在请求入口固定；key 隔离用户、场景、计算版本和批次
+        CacheKey key = CacheKey.from(context);
+        ResultBatch batch = null;
+        try {
+            batch = context.runPhase("cache-read", () -> cache.get(key));
+        } catch (CacheUnavailableException | PhaseTimeoutException e) {
+            context.recordCacheFailure(e); // 视为未命中，后续仍检查全局预算
+        }
+        if (batch != null && batch.isCompatible(context)) {
+            // 携带来源请求、模型/配置版本、特征引用；只跳过后续昂贵计算
+            return Response.fromBatch(batch);
         }
 
-        // 调起链路中的下一个 Processor 执行
         Response response = callNextProcessor(context);
-
-        // Post Processing: 回栈处理 - 计算结果成功时写入缓存
-        if (response.isSuccessful()) {
-            CacheManager.getInstance().cacheUserData(userId, response.getResult());
-            return response;
+        if (response.isSuccessful() && context.canRunOptionalPhase("cache-write")) {
+            try {
+                context.runPhase("cache-write", () -> cache.put(CacheKey.forBatch(context, response.getBatch()), response.getBatch()));
+            } catch (CacheUnavailableException | PhaseTimeoutException e) {
+                context.recordCacheFailure(e); // 不覆盖已经得到的计算结果
+            }
         }
+        return response; // 包括失败状态，由外层统一出口处理
 
-        return ResponseBuilder.buildErrorResponse("User data not found");
     }
 }
 ```
 
-这部分代码示例清晰展示了 Processor 的执行模式：
+这些代码使用示意接口，不是可直接编译的框架实现。示例中的 runPhase 是有预算约束的工作边界：前置与回栈工作都要检查剩余时间，并向内部 RPC 传入超时。它不能靠一个计时器强行中断任意阻塞代码；具体契约见 3.3 节。CacheProcessor 返回的是内部候选批次，不是直接发给客户端的成功响应。框架必须在 Chain 外执行 FinalizeResponse，完成分页/广告后的最终校验、Delivery Log 和 Renderer；异常或兜底也经过这个出口，详见架构第 12 篇第 7 节。
+
+这部分代码示例展示了 Processor 的执行模式：
 
 - 在 callNextProcessor 方法之前的代码都属于正向前置处理，主要针对请求侧做处理。
 - callNextProcessor 方法把控制权返回给 Execution。Execution 对象会从链路中找到下一个 Processor 实例，并调用其 process 方法。
@@ -151,7 +159,7 @@ class ProcessorD extends Processor {
 
 正向执行阶段：框架调用 ProcessorA.process 方法，开始链路执行。ProcessorA 中 callNextProcessor 把控制权交还给 Execution 调度器，调度器找到下一个节点为 ProcessorB，然后调用 ProcessorB.process 方法。后续通过 callNextProcessor 依次调用 ProcessorC、ProcessorD。链尾 ProcessorD 调用完之后，开始返回，进入回栈。
 
-反向回栈阶段：ProcessorD 返回 Response，依次返回给 ProcessorC、ProcessorB、ProcessorA，进行回栈部分代码执行。如果没有后置业务逻辑处理代码则继续往后回栈，最后结果返回给框架，进入 Rendering 阶段。
+反向回栈阶段：ProcessorD 返回 Response，依次返回给 ProcessorC、ProcessorB、ProcessorA，进行回栈部分代码执行。如果没有后置业务逻辑处理代码则继续往后回栈，最后结果返回给框架，经过 FinalizeResponse 再进入 Rendering 阶段。图中只画业务 Chain 的调用与回栈，未展开统一出口。
 
 这个模型中，所有的执行逻辑都在单次请求流程中完成，没有复杂的额外调度机制，整体调度开销很低。一个业务逻辑单元的正向、回栈处理都在一个 Processor 内部完成，开发起来比较方便。
 
@@ -163,17 +171,17 @@ class ProcessorD extends Processor {
 
 **Processor 短路执行**
 
-如前面的 CacheProcessor 示例所述，在 Processor 中，可以根据 Request 参数以及本地状态，决定是否对后续所有 Processor 进行短路。这个非常适合缓存的场景，当命中缓存时，从缓存取数据快速返回，很大程度上节省链路的整体执行时间。
+如前面的 CacheProcessor 示例所述，在 Processor 中，可以根据 Request 参数以及本地状态，决定是否对后续所有 Processor 进行短路。这个非常适合缓存的场景，当命中缓存时，从缓存取数据快速返回，节省召回和排序耗时，但不能跳过 Chain 外不可关闭的最终有效性/展示约束检查与返回日志。
 
 **分支执行**
 
-框架在 ExecutionContext 中保存变量控制 Processor 是否要跳过（例如 ProcessorB.skip = true）。Execution 执行某个 Processor 前，检查对应的 skip 标志；如果需要跳过，则直接找到该 Processor 的下一个节点执行。因为这个跳过的 Processor 没被执行，回栈逻辑也不经过它。
+框架在 ExecutionContext 中保存变量控制 Processor 是否要跳过（例如 nodeB.skip = true，标识节点位置而非共享 Processor 实例）。Execution 执行某个 Processor 前，检查对应的 skip 标志；如果需要跳过，则直接找到该 Processor 的下一个节点执行。因为这个跳过的 Processor 没被执行，回栈逻辑也不经过它。
 
 而后在配置链路时，配置两个分支 Processor1 和 Processor2，根据 ExecutionContext 的标识，来控制是否要跳过 Processor1 或 Processor2。这样框架能一定程度上支持简单的分支执行。
 
 **并行子链扩展**
 
-对于一些并行处理场景，框架提供了一个特殊的 ParallelChainsProcessor。在链路配置的最末端，配置该 Processor，可以并行执行多个子链，等待所有结果返回后进行合并，再将结果返回上一层。这样可以解决基础模型无法并行的短板。不过这个 Processor 有严格的约束，只能放在链路最后位置，以免打乱主体链路的执行逻辑。
+对于一些并行处理场景，框架提供了一个特殊的 ParallelChainsProcessor。在链路配置的最末端，配置该 Processor，可以并行执行多个子链，在预算内等待子链，并在全部完成或到达汇合截止点时合并已完成且有效的结果，再将结果返回上一层。这样可以解决基础模型无法并行的短板。不过这个 Processor 有严格的约束，只能放在链路最后位置，以免打乱主体链路的执行逻辑。
 
 使用该 Processor 的完整配置示例如下：
 
@@ -207,7 +215,9 @@ class ProcessorD extends Processor {
 }
 ```
 
-核心逻辑：主链路执行到末端 ParallelChainsProcessor 时，框架读取配置，找到即将执行的两个子链。此时框架从主链的 ExecutionContext 中复制出两个新实例，再创建两个新 Execution 对象，并行发起 subChain1、subChain2 的执行。两个子链异步并行执行，互相不影响。等所有子链执行完之后，ParallelChainsProcessor 收集处理之后的 ExecutionContext 和 Response，汇总到主链的 ExecutionContext 和 Response 中，逐级回栈返回。这样，框架在不改动基础模型调度的基础上实现了并行能力。
+核心逻辑：ParallelChainsProcessor 为每个子链建立独立的 Execution 和可变上下文。Request、配置及只读特征可以共享；候选列表、Map、Response、日志缓冲和执行游标必须独占，可采用深拷贝或 copy-on-write，不能只做浅拷贝。共享的 Item 对象也必须不可变，否则复制列表仍不隔离。
+
+子链继承主请求的截止预算，同时可以有更短的子预算。主流程只等待到允许的汇合截止点，收集已完成结果，按预定来源优先级、去重和日志合并规则提交；不是无限等待所有子链。超时后尝试取消剩余任务，任务只能返回独立结果，不能继续写主 Context。过期、已取消的结果不得提交；所有子链失败则交给上层降级，最后仍经过统一出口。
 
 ## 3. 调度执行器核心实现
 
@@ -224,56 +234,61 @@ class ProcessorD extends Processor {
 每次请求进来，进行请求的初始化：
 
 - 将 exp_id 展开成实际参数，其中包括 Chain 名称。
-- 创建 Execution 调度对象，根据配置 Chain 名称找到 Chain 实例，把 Processor 列表复制到 Execution 对象中。
-- 对于每个 Processor 实例，创建一个计时器（Stopwatch），放入 Execution 对象。根据请求的 Deadline 配置和当前时间，计算请求最终的 Deadline 时间戳，存入 Execution 对象中。
+- 创建 Execution 调度对象，根据配置 Chain 名称找到 Chain 实例，持有该版本的不可变节点列表快照；每个位置具有独立 node_id。
+- 对于每个节点位置，创建一个计时器（Stopwatch），放入 Execution 对象。使用单调时钟记录开始时间和剩余预算，计时器按节点位置创建而不是按共享 Processor 对象创建，预留最终校验与封装时间。
 - 创建 ExecutionContext 对象，把 Request 请求、exp_id 扩展出来的参数、Execution 对象都附加在 ExecutionContext 对象中。
-- Execution 以新创建的 ExecutionContext 为参数调用 execute 方法，开始执行第一个 Processor。
+- Execution 以新创建的 ExecutionContext 为参数调用 executeNext 方法，开始执行第一个 Processor。
 ### 3.3 Execution 调度器
 
-Execution 调度器的核心执行方法是 execute，其大概执行过程伪代码如下：
+Execution 持有请求独占的调用帧栈，按节点索引前进，不通过 `indexOf(processor)` 查下一节点。这样同一个无状态 Processor 实例在链中出现两次，也不会回到第一次的位置。
 
-``` JAVA
-Response execute(ExecutionContext context, Processor currentProcessor) {
-    Processor nextProcessor = null;
-    if (currentProcessor == null) {
-        nextProcessor = processorList.get(0);
-    } else {
-        int currentIndex = processorList.indexOf(currentProcessor);
-        if (currentIndex + 1 < processorList.size()) {
-            nextProcessor = processorList.get(currentIndex + 1);
-        }
+```java
+// 示意：Execution、frames、timers 均属于单个请求/子链；nodes 为不可变快照
+Response executeNext(ExecutionContext context) {
+    Frame parent = frames.peek();
+    int nextIndex = parent == null ? 0 : parent.index + 1;
+    if (nextIndex >= nodes.size()) {
+        return ResponseBuilder.buildNoMoreProcessorResponse(); // 空链也适用
     }
-
-    if (nextProcessor == null) {
-        return ResponseBuilder.buildNoMoreProcessorResponse();
-    }
-
-    if (System.currentTimeMillis() > context.getDeadline()) {
+    if (!context.hasWorkBudget()) {
         return ResponseBuilder.buildErrorResponse("Deadline exceeded");
     }
 
-    StopWatch nextStopWatch = stopWatches.get(nextProcessor);
-    if (currentProcessor != null) {
-        stopWatches.get(currentProcessor).stop();
+    Frame child = new Frame(nextIndex, timers.get(nextIndex));
+    if (parent != null) parent.timer.pause();
+    frames.push(child);
+    child.timer.resume();
+    try {
+        return nodes.get(nextIndex).processor.process(context);
+    } finally {
+        child.timer.pause();
+        frames.pop();
+        if (parent != null) parent.timer.resume();
     }
-    nextStopWatch.resume();
-    Response response = nextProcessor.process(context);
-    nextStopWatch.stop();
-    if (currentProcessor != null) {
-        stopWatches.get(currentProcessor).resume();
-    }
-
-    return response;
 }
 ```
 
-> 注：此处仅是伪代码，异常处理、Deadline 具体处理逻辑、StopWatch 边界条件等都经过简化。此代码仅展示大概的调度逻辑。
+这里的计时器是自定义累积计时器，初始暂停，resume 开始计时、pause 累计并暂停；不混用可能有其他生命周期语义的 stop。finally 保证异常路径也恢复帧栈和计时。首次调用 executeNext 时帧栈为空，从 0 开始；Processor 的 callNextProcessor 根据当前帧进入下一位置。允许重复实例但不允许单节点无约束地反复调用 next；分支及循环应有显式模型。
 
-- 链路最开始调用时：Execution.execute(context, null)，此时没有传入正在执行的 Processor，Execution 对象找到链路第一个 Processor 开始执行。
-- 第一个 Processor 执行 callNextProcessor 时，控制权转回 Execution.execute 方法，此时 currentProcessor 指向正在执行的 Processor。然后 Execution 能找到它的下一个节点。
-- 如果下一个节点为空，直接返回 NoMoreProcessor，回栈处理时，上一个 Processor 知道自己处于链路最末尾。
-- 每次执行 Processor 之前，都检查 Deadline 是否到达，超时直接返回错误。
-- 因为是栈式调用，执行下一个 Processor.process 方法之前把当前 Processor 的计时器暂停，然后开始下一个 Processor 计时器。下一个 Processor 返回之后再继续当前 Processor 计时器。这样统计的执行时间，是当前 Processor 真正执行消耗的时间。
+这段代码只解决调度边界，**不是完整超时实现**。回栈中实际执行特征获取、推理、重排之前仍需 runPhase 检查预算：
+
+```java
+Response response = callNextProcessor(context);
+if (!response.isSuccessful()) return response;
+if (!context.canRunPhase("prediction")) return compatibleFallback(context);
+
+// 同时扣除必要的出口收尾预留；timeout <= 0 时不得发出 RPC
+Duration timeout = context.rpcTimeout("prediction");
+Prediction result = predictionClient.predict(response.getItems(), timeout);
+if (!context.commitIfActive(result)) {
+    return ResponseBuilder.buildErrorResponse("Prediction result expired");
+}
+return response.withPrediction(result);
+```
+
+rpcTimeout 取阶段剩余预算与请求剩余预算（扣除收尾预留）的较小值。真实 RPC、Future 等等待边界必须使用该超时；CPU 长循环协作检查预算。计时不能中止不可取消的同步调用，停止等待也不意味着远端或 GPU 已停止。异步工作只产生独立结果，主线程在有效期内提交，不能仅在启动任务时检查一次 Deadline。
+
+框架入口捕获未处理异常，选择候选或兜底后统一进入 FinalizeResponse。它在全部列表修改之后检查最新内容状态、用户屏蔽、权限及页面约束，并记录实际返回集合和原特征来源；安全状态未知则少返回或空返回，不能因为超时绕过。必要日志通过有界可靠队列提交并监控失败，缺失特征或日志状态显式标记，不能拿不完整记录悄悄训练。空链、短路和全部子链失败也遵守同一出口契约。
 
 ### 3.4 跨语言实现
 
@@ -305,7 +320,7 @@ Processor 实例创建有两种方案：一个实例复用到所有请求、每�
 
 如果链路配置支持热更新，那么在不重启服务的情况下可以对 Process Chain 进行修改，这样能很大程度上提升其灵活性，并且在线上出现问题时也可以进行快速修复。但热更新会带来一些问题，影响稳定性，配置写错了可能会导致整个链路异常。
 
-经过讨论和权衡，最终确定还是保持热更新策略，然后在框架中增加配置前置校验机制。在配置有变更的情况下，自动校验配置格式、实例化 Chain 和 Processor，然后分析链路的合法性以及拓扑合理性。如果这些校验步骤失败，则配置更新失败，从而最大限度地兼顾链路配置的灵活性和运行稳定性。
+经过讨论和权衡，最终确定还是保持热更新策略，然后在框架中增加配置前置校验机制。在配置有变更的情况下，自动校验配置格式、实例化 Chain 和 Processor，然后分析链路的合法性以及拓扑合理性。校验成功后生成不可变的 Chain、节点参数和实验配置快照，通过一次原子指针替换发布。请求入口固定该快照，在途请求继续用旧版，不能在共享 Processor 上逐字段修改配置；旧版保留到引用释放。校验失败保留旧版本并告警。必要的框架级出口检查不允许通过普通 Chain 配置移除。
 
 ### 4.4 模型局限性与扩展
 

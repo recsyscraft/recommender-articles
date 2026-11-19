@@ -91,7 +91,7 @@ Layer 是这个多层实验框架的核心，一个 Domain 内部可以分为多
 
 多层实验模型中，请求先应用匹配的 Launch Layer 参数，再进行顶层 Domain 分流。Domain 的分流规则和 Layer 内类似，使用 user_id 与顶层的 HashSeed 计算桶编号，路由到对应 Domain。
 
-进入 Domain 之后，根据配置从上到下依次在各 Layer 中进行分流。每个 Layer 内部的分流和单层实验模型类似。此处的 HashSeed 类似于单层实验模型中的 traffic_salt，user_id + HashSeed 哈希然后对 hash_base 取模。在多层实验模型中，bucket 的配置和之前略有升级。每个实验会配置 bucket_start 和 bucket_end，取模之后的余数落于 `[bucket_start, bucket_end)` 则命中该实验。
+进入 Domain 之后，根据配置从上到下依次在各 Layer 中进行分流。每个 Layer 内部的分流和单层实验模型类似。此处的 HashSeed 类似于单层实验模型中的 traffic_salt，user_id + HashSeed 哈希然后对 hash_base 取模。在多层实验模型中，每个 Layer 沿用第 11 篇的显式区间配置。每个实验会配置 bucket_start 和 bucket_end，取模之后的余数落于 `[bucket_start, bucket_end)` 则命中该实验。
 
 整个分流大概流程：
 

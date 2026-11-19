@@ -24,11 +24,11 @@
 
 **结果缓存**
 
-Key：用户 ID；Value：最终推荐计算结果 Content ID 列表。这类缓存一般部署在整条链路的最末端，适合用户高频刷新的场景。（上图中的 Cache Hit 就是指是否命中结果缓存）
+Key：场景、用户和计算配置指纹；Value：推荐批次、候选列表及生成来源元数据。这类缓存一般部署在整条链路的最末端，适合用户高频刷新的场景。（上图中的 Cache Hit 就是指是否命中结果缓存）
 
 **召回缓存**
 
-Key：用户兴趣标签（兴趣向量）；Value：根据用户兴趣召回的 Content ID 列表。这一类缓存一般在召回（Recall）阶段，由 Recall Manager 管理，可以缓解召回源的高频查询压力。
+Key：场景、召回配置/索引版本、必要上下文和兴趣表示；Value：尚未应用个人过滤的可共享召回候选。这一类缓存一般在召回（Recall）阶段，由 Recall Manager 管理，可以缓解召回源的高频查询压力。
 
 除了上面说到两类，其他的还可能有：
 
@@ -45,9 +45,9 @@ Key：用户兴趣标签（兴趣向量）；Value：根据用户兴趣召回的
 
 Redis 是业界最成熟的缓存体系之一，在推荐系统中广泛被使用。结果缓存、召回缓存，都可以直接用 Redis 来实现，是中小团队实现缓存的最快落地方案。
 
-结果缓存是直接面向用户的，为了解决用户短时间重复刷新问题设立。所以结果缓存的 Key 一般设计带上用户 ID 做标识，形如：`result:{scene_id}:{uid}`，这样可以通过用户 ID 直接定位到结果。Value 一般为用户最终推荐内容 ID 列表，可以采用 JSON 或者 Protobuf 等序列化方式存储。中小规模场景用 JSON 会更方便调试；大规模下用 Protobuf，和 JSON 相比能节省 30% 以上存储空间，同时也能减少编码解码的时间消耗。结果缓存一般会设置 5 ~ 10 分钟的过期时间。过期时间设置太短会让缓存命中率下降，性能优化效果不佳；过期时间太长不能响应用户实时兴趣，降低体验。
+结果缓存是直接面向用户的，为了解决用户短时间重复刷新问题设立。所以结果缓存的 Key 一般设计带上用户 ID 做标识，形如：`result:{scene_id}:{uid}:{config_fingerprint}:{generation_id}`，config_fingerprint 覆盖影响结果的实验运行/服务配置、模型及策略版本和必要上下文；generation_id 标识不可变的推荐批次，最新批次另用指针定位。不是把所有字段机械塞进 Key，而是先定义哪些输入变化必须判为不兼容。Value 除候选内容 ID 列表外，还保存原特征快照引用、来源请求、模型/配置版本及生成时间，可以采用 JSON 或者 Protobuf 等序列化方式存储。中小规模场景用 JSON 会更方便调试；大规模下用 Protobuf，相对 JSON 可能减少字段名等开销，实际压缩比例和编解码成本应按具体 Schema 与载荷测量。结果缓存一般会设置 5 ~ 10 分钟的过期时间。过期时间设置太短会让缓存命中率下降，性能优化效果不佳；过期时间太长不能响应用户实时兴趣，降低体验。
 
-召回缓存是为了解决兴趣标签、向量检索的重复计算和查询压力，Key 一般包含用户兴趣/向量 Hash 之后的值，例如：`recall:{scene_id}:{interest_hash}`。Value 是多路召回聚合之后的候选内容 ID 列表。召回缓存因为 Key 是用户兴趣，过期时间可以设置比结果缓存长一些，一般设置在 10 ~ 15 分钟。
+召回缓存是为了解决兴趣标签、向量检索的重复计算和查询压力，Key 一般包含用户兴趣/向量 Hash 之后的值，例如：`recall:{scene_id}:{recall_fingerprint}:{context_key}:{interest_hash}`。recall_fingerprint 包含召回策略、模型/索引和兴趣表示版本；context_key 包括影响候选范围的地域、语言等上下文。共享 Value 是个人历史、权限和负反馈过滤之前的候选列表，不能带入原用户专属的过滤结果。召回缓存因为 Key 是用户兴趣，过期时间可以设置比结果缓存长一些，一般设置在 10 ~ 15 分钟。
 
 如果采用 Redis 做缓存，可以在推荐引擎中直接添加相应代码来读写。也可以把 Redis 做个简单的封装，把 Key、Value 组装这些逻辑集中起来，推荐引擎直接调用封装之后的服务接口就行。这两种方式 Key 都是精确匹配；在召回缓存场景中，如果兴趣标签有任意微小变化，Key 都不一样，从而导致缓存不命中，达不到性能优化目的。
 
@@ -59,16 +59,16 @@ Redis 是业界最成熟的缓存体系之一，在推荐系统中广泛被使�
 
 另一项也是最核心的改进在于支持相似度匹配，适配推荐场景中，相似兴趣的推荐结果也类似的情况。大概的做法就是通过算法把用户高维兴趣特征转换为可比对的缓存标识，然后通过相似度算法来判断两个 Key 是否类似。这样就算用户实时兴趣有了小变化，通过相似度匹配也能命中缓存；此外对于一些具有长尾兴趣的用户，在一定相似度阈值内也能利用缓存加速。
 
-在业界大的推荐平台中，很多系统都会采用这样的自研 Cache 方案，同时支持精确 Key 匹配和相似度匹配。这样既能支持热点用户结果缓存的精确型匹配，保证原有的推荐体验；也能支持相似用户、新用户冷启动用户、具有长尾兴趣的用户，通过相似匹配来优化系统整体性能。
+在业界大的推荐平台中，很多系统都会采用这样的自研 Cache 方案，同时支持精确 Key 匹配和相似度匹配。这样既能支持热点用户结果缓存的精确型匹配，但仍需验证结果新鲜度和业务指标；也能支持相似用户、新用户冷启动用户、具有长尾兴趣的用户，通过相似匹配来优化系统整体性能。
 
 ## 3. 自研 Cache 的设计
 
-推荐系统和数据库最大的区别在于：推荐结果不存在唯一正确答案。兴趣高度相似的两个用户，推荐结果通常也高度相似。因此，我们不需要完全相同的 Key，而是寻找“足够相似”的缓存。
+推荐系统和数据库最大的区别在于：推荐结果不存在唯一正确答案。兴趣高度相似的用户可能共享部分召回候选。因此，下面的相似匹配仅用于同一兼容命名空间内的召回候选复用，不用于跨用户共享最终排序结果。标签相似也不代表权重、短期意图或权限相同；命中后仍要按当前用户过滤、补召回、取特征和排序。
 
 自研 Cache 的核心点是通过用户兴趣的相似度来判断是否命中，下面我们来看看这个核心功能的大概原理和工程实现。
 ### 3.1 相似度匹配
 
-用户兴趣可以看成一个标签集合，例如：{科技, 娱乐, 体育}（每个元素也可以是带权重的标签）。两个用户兴趣集合的相似度，可以通过 Jaccard 相似度来计算，公式是
+用户兴趣可以看成一个标签集合，例如：{科技, 娱乐, 体育}（本例忽略权重，只保留标签是否存在）。两个用户兴趣集合的相似度，可以通过 Jaccard 相似度来计算，公式是
 $$
 J(A,B)=\frac{|A \bigcap B|}{|A \bigcup B|}
 $$
@@ -79,21 +79,19 @@ J(A,B) = \frac{|A \bigcap B|}{|A \bigcup B|} = \frac{|\{c,e\}|}{|\{a, b, c, d, e
 $$
 所以这两个集合相似度可以表示 2/7 ≈ 0.2857。根据公式，Jaccard 相似度的值域为 0 ~ 1。
 
-当 A、B 两个集合比较大时，计算 Jaccard 相似度非常耗资源，所以业界一般用 MinHash 来计算。
+本例使用普通集合 Jaccard。若要比较非负兴趣权重，应定义加权 Jaccard 并使用相应的 [Weighted MinHash](https://ekzhu.com/datasketch/weightedminhash.html)；不能把普通 MinHash 直接解释成带权相似度。稠密 Embedding 则应选用适配其距离的检索方法。面对大量集合比较，可用 MinHash 签名估计相似度，降低重复比较成本。
 
 ### 3.2 MinHash 算法
 
-选择一个均匀分布的随机 Hash 函数，对集合 A 中每个元素计算 Hash 值，然后取最小值，记为 hmin(A)，作为其 MinHash 签名；对集合 B 中每个元素做同样计算，得到 hmin(B)。基于 Hash 的均匀随机性，hmin(A) 和 hmin(B) 相等的概率近似等于 A、B 集合的 Jaccard 相似度。（具体的数学原理此处不过多展开）
+理想 MinHash 对元素全集使用均匀随机排列，取每个集合中排列次序最小的元素。两个集合最小元素相同的概率等于它们的 Jaccard 相似度。用 k 个独立排列生成签名，比较**对应位置**相等的个数 y，估计值为 y/k；理想假设下无偏，方差为 s(1-s)/k。不能把两个签名的数值当作集合，再计算交并比。
 
-如果只选取一个 Hash 函数，计算 hmin(A) 和 hmin(B)，结果是 0 或者 1，不能得到 0 ~ 1 区间的相似度。所以，我们可以选择 k 个不同的 Hash 函数，分别对 A、B 计算 MinHash 各获得一个 k 维向量。比较这两个向量中对应位置元素相等的个数 y 和 k 的比值（y/k），可以作为 A、B 两个集合 Jaccard 相似度的估计。这个估计是无偏的，并且可以通过增加 Hash 函数数量 k 来减少估算方差。
+工程上通常用哈希近似排列。下面以 k=128 为例，用固定的多组种子/盐值生成签名；不同盐值不严格保证独立或无偏，需检查哈希碰撞、估计误差及阈值附近的误命中。所有节点必须固定标签规范化、字符编码、哈希实现、种子和签名版本，升级时隔离索引。可参考 [MinHash 实现文档](https://ekzhu.com/datasketch/minhash.html)。
 
-在实际的工程实现中，通常取 k = 128；但此处存在一个工程难点：很难找到 128 个不同的 Hash 函数。在实际的实现中，一般采用采用折中方案，用一个基础 Hash 函数（例如 MurmurHash），然后通过 k 次不同加盐计算获得 k 维 MinHash 向量。同一个基础 Hash 函数加不同盐值生成的 Hash 值可视为相互独立，满足前面说的无偏估计要求。 
-
-解决了两个集合相似度快速计算问题，回到我们 Cache 的主题，是为了从缓存中找到相似的记录。若没有任何优化加速，每一个用户请求进来，都需要把当前画像和缓存中所有记录全部比较一遍，扫描的时间复杂度是 O(N)（N 为缓存的记录数）。这个时间复杂度在线上不能接受，所以需要其他策略来解决这个问题，LSH 分桶就是其中最常用的一种。
+签名生成成本为 O(k×|标签集合|)，比较两个签名为 O(k)。若逐条扫描 N 条缓存，需 O(Nk)，因此还需要 LSH 索引减少候选。
 
 ### 3.3 LSH 分桶
 
-LSH （Locality Sensitive Hashing，局部敏感哈希）分桶的算法，是把 k 维 MinHash 向量分成不同的组（Band，也可以称作桶，），每一个 Band 内所有 MinHash 签名连接起来构成一个 Key。查询时，比较所有 Band Key，只要有任意一个 Key 命中，则表示两个 k 维 MinHash 向量有可能相似，然后再进行这个桶内实际 MinHash 向量比较。用这种分桶方式，整个 O(N) 的扫描，变成了 k\*O(m) 的复杂度，其中 m 是一个桶内最大 MinHash 向量个数。在工程实现中，k 是个固定的常数数值（例如 16），所以时间复杂度可简化为 O(m)。
+LSH（Locality Sensitive Hashing，局部敏感哈希）把 k 维签名拆为 b 个 Band，每个 Band 含 r 个位置，k=b×r。查询 b 个 Band Key，将命中的记录 ID 去重，得到 U 条候选，再做完整签名比较。若每桶最多 m 条记录，读取至多 b×m 个引用，比较成本为 O(Uk)，还需计入 O(k×|标签集合|) 的签名生成、O(k) 的分桶和数据读取成本。b=16 是 Band 数量，不是签名维度 k=128。热点桶可能退化到 U≈N，应限制桶大小和总候选量；限额会带来漏检，需测量。
 
 Band 的数量划分一般要考虑 Band 内部 MinHash 签名的个数。如果单 Band 内 MinHash 签名数量过多，可能存在微小变化从而导致 Band Key 变化的问题，最后导致漏命中、缓存命中率下降。如果单 Band 内 MinHash 签名数量过少，那样 MinHash 签名更容易相似，从而导致一个 Band 内列表过长，也即是前面所说的 m 值过大，计算过程变得更复杂。对于 k = 128 维的 MinHash 向量，可以选取 16 个 Band，每个 Band 内 8 个 MinHash 签名。
 
@@ -101,25 +99,24 @@ Band 的数量划分一般要考虑 Band 内部 MinHash 签名的个数。如果
 $$
 P = 1-(1-s^r) ^b
 $$
-（具体数学原理可以查询相关资料：LSH 标准概率公式，此处不过多展开）。当 b=16、r=8、s=0.9 时，P=99.96%，代表这样两个向量肯定能被某一个分桶检索到。如果 s=0.8，P=94.7%，也在 95% 的黄金拐点附近。这也是这组参数目前很多系统使用的原因之一。
+该公式假设签名位置及 Band 满足相应独立性，且不计额外的 Band Key 哈希碰撞。当 b=16、r=8、s=0.9 时，P≈99.9877%；s=0.8 时，P≈94.7049%。这是“进入候选集合”的概率，不是最终缓存命中率，也不是一定检索到。最终命中还受签名估计误差、阈值、TTL、配置兼容和候选限额影响；不存在通用的“95% 黄金拐点”，参数要用业务样本选择。
 
 ### 3.4 Cache 流程
 
-根据前面的 MinHash 和 LSH 分桶原理讲解，我们可以设计 Cache 的结构如下：
+根据前面的 MinHash 和 LSH 分桶原理讲解，可以设计以下结构。Band 索引和业务数据必须使用同一命名空间，包含场景、召回策略/索引版本和必要上下文；不允许先跨实验匹配，再仅凭相似度返回数据。
 
-- Band Key 索引：Key 为 Band Key，Value 为 128 维 MinHash 向量 列表，因为多个不同 MinHash 向量可能某个 Band 都一样。
-- 业务数据缓存：Key 为 MinHash 向量，Value 为 MinHash 向量本身加上召回列表。
+- Band Key 索引：Key 为带命名空间和 Band 编号的粗筛键，Value 为紧凑 entry_id 集合及成员到期时间；每条记录最多出现在 b 个桶中，不在每个桶复制完整签名。
+- 业务数据缓存：Key 为命名空间内唯一 entry_id，Value 保存一次完整签名、候选列表、版本与到期时间。entry_id 不能直接用 32 位 Band 哈希充当。
 
-带 Cache 的执行流程大概如下：
+请求先生成签名和 Band Key，批量读取索引、去重并限制候选数，再批量读取仍有效且版本兼容的业务记录。按对应位置相同比例估计相似度，选择超过阈值的最佳有效记录；某条数据已过期时应继续比较其他记录。空兴趣集合跳过相似缓存，进入明确的冷启动召回。
 
-- 用户请求进来，根据用户 ID 获取用户画像，经过处理形成兴趣向量。
-- 兴趣向量经过 MinHash 计算，获得 128 维 MinHash 向量。然后根据 LSH 分桶，获得 16 个 LSH Band Key。
-- 从缓存 Band Key 索引并行查询 16 个 Band Key，如果有任一命中，进行当前 MinHash 向量和索引中 MinHash 向量进行 Jaccard 相似度计算，找到符合阈值且最优的那个。然后根据符合条件的 MinHash 从业务数据缓存中获取数据返回。如果没有任何命中或相似度不满足阈值，继续后续流程。
-- 进行实时的召回计算，获取召回列表。
-- 写入缓存操作：把 MinHash 向量作为 Key，MinHash + 召回列表作为 Value 写入业务数据缓存；然后往 16 个 Band Key 对应 Value 列表末尾附加当前 MinHash 向量。
-- 结果返回。
+未命中时计算可共享候选，先写主数据，再幂等写入各桶的 entry_id 和到期时间。索引写入失败只影响可发现性；主数据过期后的死引用需惰性删除和定期清理，空桶回收，重复写入不能无限追加列表。仅刷新整个桶的 TTL 会让老成员长期残留，不能替代成员级过期。
+
+候选返回后，仍按当前用户的历史、屏蔽、权限过滤，必要时补候选，再取特征和排序。原用户专属分数不能当作当前用户分数；需重算、标记不可复用，或只复用 ID。
 
 ### 3.5 核心伪代码
+
+以下为接口语义伪代码，省略缓存读失败兜底、RPC Deadline、并发控制和清理任务。缓存读取失败应按未命中处理；所有操作受请求预算约束。函数仅返回共享召回候选；scope 同时约束索引与数据缓存。调用方还需执行个人过滤和排序，不能把返回值直接当作对用户的完整推荐响应。
 
 
 ```java
@@ -130,44 +127,61 @@ private static final int LSH_BAND_COUNT = 16;
 private static final int LSH_UNIT_PER_BAND = MINHASH_SIGN_LEN / LSH_BAND_COUNT;
 private static final int CACHE_TTL_SECONDS = 600;
 
-public List<Long> queryRecommendWithLshCache(Long uid, Set<String> userInterest) {
-    // 1. 构建用户实时128维MinHash签名、16个LSH Band Key
+public List<Long> querySharedRecallWithLshCache(RecallScope scope, Set<String> userInterest) {
+    // scope 绑定召回/索引/上下文、标签规范化及哈希版本
+    if (userInterest.isEmpty()) {
+        return recallSharedCandidates(scope, userInterest);
+    }
     long[] currentSign = buildUserMinHashSign(userInterest);
     Set<String> bandKeys = buildLshBandKeys(currentSign);
 
-    // 2. 批量查询所有关联索引桶，获取候选数据Key
-    List<IndexEntity> candidateKeys = cacheCluster.batchGetIndexEntity(bandKeys);
-    
-    // 3. 计算 Jaccard 相似度
-    IndexEntity bestMatchEntity = null;
-    double maxSimilarity = 0.0;
-    
-    for (IndexEntity entity : candidateKeys) {
-        double similarity = calcJaccardSimilarity(currentSign, entity.getMinHashSign());
-        if (similarity >= SIMILARITY_THRESHOLD && similarity > maxSimilarity) {
-            maxSimilarity = similarity;
-            bestMatchEntity = entity;
+    // 有界查询：逐桶过滤过期成员、限制返回量，再全局去重和限额
+    Set<Long> entryIds = cacheCluster.queryLiveEntryIdsBounded(scope, bandKeys);
+    List<CacheEntity> candidates = cacheCluster.batchGetData(scope, entryIds);
+    CacheEntity best = null;
+    double bestSimilarity = -1.0;
+    for (CacheEntity entity : candidates) {
+        // 主数据可能已淘汰；版本/到期条件以主记录为准
+        if (entity == null || !entity.isCompatibleAndLive(scope)) continue;
+        double similarity = estimateJaccard(currentSign, entity.getMinHashSign());
+        if (similarity >= SIMILARITY_THRESHOLD && similarity > bestSimilarity) {
+            bestSimilarity = similarity;
+            best = entity;
         }
     }
-    
-    if (bestMatchEntity != null) {
-	    CacheEntity cacheEntity = cacheCluster.getCacheEntity(bestMatchEntity.getMinHashSign());
-	    if (cacheEntity != null) {
-		    return cacheEntity.getItemIdList();
-	    }
+    if (best != null && best.isCompatibleAndLive(scope)) {
+        return best.getItemIdList();
     }
-    
-    // 未命中缓存
-    List<Long> itemList = doRealTimeRecommend(uid, userInterest);
-    
-    // 写入缓存
-    CacheEntity cacheEntity = new CacheEntity(currentSign, itemList);
-    cacheCluster.setDataCache(currentSign, cacheEntity, CACHE_TTL_SECONDS);
-    
-    for (String bandKey : bandKeys) {
-	    cacheCluster.appendIndexEntity(bandKey, currentSign);
+
+    List<Long> itemList = recallSharedCandidates(scope, userInterest);
+    // 缓存失败按未命中处理，仍返回召回结果；省略具体超时与错误监控
+    try {
+        long entryId = cacheCluster.allocateUniqueEntryId(scope);
+        CacheEntity entity = new CacheEntity(currentSign, itemList, scope,
+                                            nowEpochSeconds() + CACHE_TTL_SECONDS);
+        cacheCluster.putData(scope, entryId, entity, CACHE_TTL_SECONDS);
+        for (String bandKey : bandKeys) {
+            cacheCluster.upsertIndexMember(scope, bandKey, entryId, entity.getExpiresAt());
+        }
+    } catch (CacheException e) {
+        recordCacheWriteFailure(e); // 后台清理孤立记录和死引用
     }
+    return itemList; // 调用方继续个人过滤、补候选和排序
 }
+
+// 比较签名的对应位置，不是对签名数值集合求交并比
+public double estimateJaccard(long[] a, long[] b) {
+    if (a.length != MINHASH_SIGN_LEN || b.length != MINHASH_SIGN_LEN) {
+        throw new IllegalArgumentException("incompatible signature length");
+    }
+    int equal = 0;
+    for (int i = 0; i < a.length; i++) {
+        if (a[i] == b[i]) equal++;
+    }
+    return (double) equal / a.length;
+}
+
+
 
 /**
  * 生成 MinHash 向量
@@ -175,7 +189,7 @@ public List<Long> queryRecommendWithLshCache(Long uid, Set<String> userInterest)
 public long[] buildUserMinHashSign(Set<String> interestTags) {
     long[] minHashSign = new long[MINHASH_SIGN_LEN];
     Arrays.fill(minHashSign, Long.MAX_VALUE);
-    // 多组加盐哈希函数，模拟独立哈希，保证签名离散度
+    // 多组固定盐值近似独立排列；固定 UTF-8/哈希版本并离线验证误差
     for (String tag : interestTags) {
         for (int idx = 0; idx < MINHASH_SIGN_LEN; idx++) {
             long currHash = murmurHash(tag + "_salt_" + idx);
@@ -196,6 +210,7 @@ public Set<String> buildLshBandKeys(long[] minHashSign) {
         int start = bandIdx * LSH_UNIT_PER_BAND;
         int end = start + LSH_UNIT_PER_BAND;
         long[] bandSubSign = Arrays.copyOfRange(minHashSign, start, end);
+        // 32 位哈希可能碰撞，只作粗筛；后续完整签名复核，不能作 entry_id
         String bandKey = LSH_BUCKET_INDEX_PREFIX + bandIdx + "_" + Arrays.hashCode(bandSubSign);
         bandKeySet.add(bandKey);
     }
@@ -208,23 +223,30 @@ public Set<String> buildLshBandKeys(long[] minHashSign) {
 
 以下是我之前经历过的一个实际案例相关数据，以结果缓存和召回列表缓存为例。
 
-提前说明一下，以下案例来自我参与过的实际推荐系统项目。文中的系统架构、设计思路、上线结果都来自真实工程实践。但由于时间较久，部分原始测试记录已经缺失，文中少量容量估算、用户规模等数据根据当时保存的结果进行了反推和整理，数值可能存在小幅误差，但不影响整体设计思路和工程结论。
+提前说明一下，以下案例来自我参与过的实际推荐系统项目。文中的系统架构、设计思路、上线结果都来自真实工程实践。但由于时间较久，部分原始测试记录已经缺失，文中少量容量估算、用户规模等数据根据当时保存的结果进行了反推和整理，因此下面把历史观测与按明确假设复算的容量分开；未保存的统计口径无法补证，不能将估算当作已验证的生产容量或普适收益。
 
 ### 4.1 两级缓存方案
 
 系统设置两级缓存，第一级为 L1 缓存，保存用户最终排序结果；第二级 L2 缓存，保存召回阶段列表。
 
-- L1 缓存，Key 为 User ID，Value 为推荐计算出来的 200 个 Item ID 以及对应打分，分数归一化到 0 ~ 1 区间。
-- L2 缓存，主数据 Key 为 MinHash 指纹，Value 为根据该画像计算出来的召回结果列表（1000条），字段：Item ID、召回源、召回源内部打分。此外还有 LSH Band Key 索引，Key 为 LSH Band Key，Value 是对应的 MinHash 列表。
+- L1 缓存，Key 为场景、User ID、配置指纹和 generation_id；Value 为生成的 200 个 Item ID、打分及来源元数据。批次是待分页的候选，不是已经通过本次出口检查的响应。
+- L2 缓存，在兼容的召回命名空间内，主数据 Key 为唯一 entry_id，Value 保存一份 MinHash 签名、约 1000 条候选、版本和到期时间；候选包含 Item ID、来源及可复用的源内分数。Band 索引保存 entry_id 和成员到期时间，不重复保存完整签名。
 
 整体流程大概为：
 
-1. 用户请求进来，推荐引擎根据 User ID 查询 L1 缓存，如果查到缓存并且数据还没消耗完，从缓存直接返回；如果没命中缓存，往后继续常规推荐流程，并把返回结果写入缓存；
-2. 根据 User ID 获取用户画像（用户兴趣列表）；
-3. Recall Manager 根据用户画像指纹（MinHash）查询 L2 缓存，如果相似度超过阈值，则命中缓存，取缓存结果进行后续排序流程；如果没命中缓存，从多路召回中获取召回数据，写入缓存；
-4. 召回候选集进行精排打分、重排等后续业务逻辑，结果返回给用户。
+1. 请求先固定实验/服务配置快照，再按用户、场景和配置指纹查询 L1。翻页 cursor 绑定 generation_id、下一候选偏移和页面策略版本；命中后跳过昂贵的召回精排，但仍执行本页组装、广告占位、最终有效性校验和 Delivery Log。
+2. L1 未命中时，获取用户画像并进入 Recall Manager；在兼容命名空间内查 L2，未命中则计算可共享候选并写入 L2。
+3. 无论 L2 是否命中，都按当前用户的历史、权限、屏蔽和负反馈过滤，重新获取个性化特征并排序。原用户专属分数不复用为当前用户打分。
+4. 重排产生批次并记录原始 Feature Log，将特征引用、source_request_id、generation_id 和模型/实验配置版本随候选写入 L1，然后再组装本页。
 
-所以此处 L1 缓存是用户级缓存，L2 缓存是兴趣级缓存，多用户（有相似兴趣的人）共享。
+**分页和重试契约**：翻页继续同一批次，下拉刷新明确创建新批次，不能把两者都当作“把共享 offset 加 20”。同一 cursor 的并发请求通过原子创建页面映射或幂等键得到同一页候选与下一 cursor，不重复推进消费进度。过期、配置不兼容或越界时显式返回重启分页标记，不能把旧偏移套到新批次；旧批次可以按保留策略供在途翻页使用。幂等记录需有有效期和用户绑定。
+
+**所有出口共用最终校验**：在广告、运营插入和截页完成后检查最新下线、用户屏蔽、权限、重复以及本页位置/配额约束。过滤后从后续候选或兜底中有限补齐，新补内容同样检查；无法确认安全则少返回或空返回，不能因为 TTL 未到期就放行。重试沿用页面映射，但仍应用新的撤销/屏蔽；因此幂等保证不重复消耗候选，不承诺安全状态变化后字节完全相同。最终校验之后不再随意改动展示集合或位置。
+
+**日志闭环**：Feature Log 记录生成时的特征和批次内位置；每次返回另记 Delivery Log，包含当前 request_id/trace_id、实际下发 item、最终位置、缓存来源和原特征引用。客户端有效展示后才生成 impression_id，并与下发条目关联。尚未展示的 200 条候选不能标为 CTR 负例；缓存条目特征引用缺失时显式标记，不用当前特征冒充原快照。
+
+约束应注明作用域：整批、当前页、会话或跨页窗口，以及是否计入广告。例如 200 条中视频占比 10% 不代表每 20 条页也满足 10%。跨页多样性应读取会话历史，并通过版本或串行化推进页状态，避免两个并发页互相看不到对方。缓存主体大小与这些元数据、分页映射和日志的额外成本需要分别估算；后文历史容量数字只描述当时的候选载荷口径。
+
 ### 4.2 离线预估
 
 #### 4.2.1 L1 用户结果缓存
@@ -244,15 +266,27 @@ public Set<String> buildLshBandKeys(long[] minHashSign) {
 
 **容量估算**
 
-一个用户结果缓存中有 200 个内容 ID 和相应的排序打分（0 ~ 1 区间），内容 ID 用 uint32 4个字节表示。排序分数原始为 0 ~ 1 区间，定点量化：`round(score x 65536)`，最小分辨率 ≈ 0.00001526。所以一个 Item 存储空间是 item_id (4B) + score (2B) = 6B，一条记录 Value 裸二进制存储空间为：6B x 200 = 1200B，加上 Key 和 Redis 本身元数据开销，单条记录占用内存大概为 1.25KB。
+本例每条 L1 记录保存 200 个 Item。仅当 ID 范围在 [0, 2³²−1] 时才可用 uint32（4 B）；超出时需 uint64 或可逆字典映射，并计入映射成本。
 
-经过历史数据测算，高峰时期 5 分钟内活跃用户数量不超过 100万（日活 3000万，高峰时期一般为晚上 20:00 ~ 22:00），考虑突发热点，容量按双倍即 200 万估算，总的 Redis 内存消耗为 1.25KB x 200万 ≈ 2.39GB。算上内存碎片、主从复制缓冲，冗余系数取 1.25，总容量预估为 2.39GB x 1.25 ≈ 2.98GB。
+若分数已明确归一化到 [0,1] 且量化误差可接受，可存为 uint16（2 B）：
+
+```text
+s = clamp(score, 0, 1)             // 先检查有限值；非有限值拒绝或按协议兜底
+q = round(s × 65535)               // 0..65535，score=1 不溢出
+restored_score = q / 65535
+```
+
+量化步长为 1/65535≈0.00001526，四舍五入最大绝对误差约为半个步长（不含浮点实现误差）。量化可能产生并列分数，应保留稳定顺序或明确 tie-break，并验证 Top K 及融合效果。任意排序分、内积和热度分不一定在 [0,1]，不能直接套用；未验证归一化时可保存 float32 等格式。
+
+在上述前提下，候选裸载荷为 200×(4+2)=1200 B。仅为演示，假设旧格式连同 Key 等占 1280 B（1.25 KiB）/条；这不是 Redis 通用开销，完整版本、特征引用、分页和索引元数据必须另行测量。本文统一采用 1 KiB=1024 B、1 GiB=2³⁰ B。
+
+历史场景按 5 分钟内高峰活跃 100 万用户、突发翻倍至 200 万条预留，则 1280×200万/2³⁰≈2.384 GiB；再假设碎片与运行缓冲系数 1.25，约为 2.980 GiB。该数只演示单份主数据预算，实际记录数还受多场景、配置版本和保留批次影响。副本需分别计入，不能用 25% 余量代替一整份副本；最终容量应以目标格式和部署参数下的内存测量、峰值压测为准。
 
 #### 4.2.2 L2 召回列表缓存
 
 **相似度和命中率**
 
-L2 缓存采用兴趣相似来命中，根据历史数据计算，取 TTL = 10 分钟时，得到相似度阈值和命中率关系如下（其他 TTL 数据丢失，只找到上线实验时的这份数据）：
+L2 缓存采用兴趣相似来命中，下面保留历史数据（命中率分母缺失，见 §4.3），取 TTL = 10 分钟时，得到相似度阈值和命中率关系如下（其他 TTL 数据丢失，只找到上线实验时的这份数据）：
 
 | Sim. Threshold | Hit Rate |
 | -------------- | -------- |
@@ -265,23 +299,47 @@ L2 缓存采用兴趣相似来命中，根据历史数据计算，取 TTL = 10 �
 
 **容量估算**
 
-TTL 取 10 分钟，每条数据保存 1000 Item ID，单条数据 7B (item_id 4B + source 1B + score 2B)，总的裸二进制占用内存：1000 x 7B = 7000B ≈ 6.84KB。额外附带 128 维 MinHash 签名、Redis 元数据开销，附加算 1.25KB。单条完整记录大小：6.84KB + 1.5KB ≈ 8.34KB。
+假设每条记录含 1000 个候选，每个候选为 item_id 4 B、单一来源编号 1 B、归一化量化分数 2 B，则裸候选载荷为 7000 B。适用条件与 L1 相同：ID 不能溢出，源编号不超过编码范围，分数可量化。多路来源需列表/位图及各源分数，使用 float32 则每个分数多 2 B；这些都要重新计费，不能静默丢掉多来源契约。
 
-L1 缓存按突发峰值的 200万用户预留，L2 缓存 TTL 为 10 分钟，对应峰值活跃用户按 400万估算。根据当时的一周离线统计结果，并结合历史容量数据估算，可得出其中 60% 为新用户或轻度使用用户（平均 3.5 个用户有相同 MinHash 签名）、30% 中度使用用户（平均 1.8 个用户有相同 MinHash 签名）、10% 重度使用用户（兴趣基本不重合）。独立的 MinHash 条目估算：400万 x 60% / 3.5 + 400万 x 30% / 1.8 + 400万 x 10% / 1 = 175.2 万。
+沿用历史反推假设：10 分钟峰值 400 万用户，60% 的用户平均 3.5 人共享一条、30% 平均 1.8 人共享一条、10% 不共享：
 
-基础内存占用：175.2万 x 8.34KB ≈ 13.93GB。叠加 LSH Band 索引、内存碎片、主从复制缓冲等，冗余系数取 1.3，一共消耗存储 = 13.93GB x 1.3 ≈ 18.1GB。
+```text
+N = 400万 × 60% / 3.5 + 400万 × 30% / 1.8 + 400万 × 10%
+  ≈ 1,752,381 条
+```
+
+这只是旧场景的条目数估算。实验隔离、多个场景或配置版本会降低共享率；持续未命中写入、重复记录与淘汰策略也会改变 N，不能只用活跃用户数推定实际在存条目数。
+
+按第 3.4 节“主表一份签名、索引仅存 ID”的设计，裸数据下界如下：
+
+| 项目 | 每条主记录对应字节数 | N 条合计 |
+| --- | ---: | ---: |
+| 候选载荷 | 7000 B | 11.424 GiB |
+| 128 维 uint64 签名，仅存一次 | 1024 B | 1.671 GiB |
+| 主记录 entry_id | 8 B | 0.013 GiB |
+| 16 个 Band 成员 ID | 16×8=128 B | 0.209 GiB |
+| 16 个成员到期时间（按 8 B 计） | 16×8=128 B | 0.209 GiB |
+| 合计 | 8288 B | 13.526 GiB |
+
+该下界未含命名空间、Band Key、版本/主记录到期字段、容器和 Redis 对象开销、碎片、过期清理滞后、临时查询缓冲及副本。需测量“主表实际占用 + 索引实际占用”，再分别预留运行缓冲和副本容量，不能用统一 1.3 倍系数隐含所有成本。若每个 Band 复制一份 1024 B 签名，仅索引签名就需 N×16×1024≈26.739 GiB，原先约 18.1 GB 的总预算无法覆盖这种结构。
 
 ### 4.3 实际上线测试情况
 
+下面保留历史观测，耗时都是均值，不能替代 P95/P99 或请求 Deadline。原始记录不完整，无法确认计时是否包含 Gateway/网络、不同阶段是否采用相同流量和负载，因而不把这些数字当成严格的同口径性能实验。
+
 **L1 结果缓存上线**
 
-业务指标（点击率、 停留时长、用户留存等）基本没有变化，和上线之前持平。线上监测到的 L1 命中率在 31% 左右，内存使用量最高没有超过 2.5GB。整体请求响应时间，平均从  198ms 降到 141ms，降幅为 28.3%。
+历史记录中点击率、停留时长、留存未见明显变化，L1 命中率约 31%，内存最高记录不超过 2.5 GB（原单位与测量范围未留存）。请求均值从 198 ms 降至 141 ms，按这两个数复算降幅为 **28.79%**。这不构成完整元数据格式下的容量保证，也不能在缺少区间估计时证明业务效果完全等价。
 
 **L2 召回缓存上线**
 
-点击率 CTR 有轻微下降（相对下降比例 3% 左右，绝对百分比下降数量在小数点后第三位），阅读时长、用户留存等指标基本不变。线上监测的 L2 缓存命中率也在 38% 左右，和线下估算基本一致。召回阶段的平均响应时间从 98ms 降到 68ms，降幅为 30.6%。叠加 L1 缓存，整体请求的响应时间，平均从 198ms 降到 108ms，降幅 45.4%。
+历史记录为 CTR 相对下降约 3%，阅读时长和留存未见明显变化。若原 CTR 为 c，则新值约为 0.97c，绝对下降为 0.03c；缺少原 CTR、实验周期、样本量和置信区间，无法补出百分点变化或判断显著性，不能用“小数点后第三位”认定损失可忽略。上线取舍应依据预定业务护栏和成本收益重新验证。
 
-此处有一个有意思的观察，召回阶段单次请求响应时间从 98ms 降为 68ms，降幅为 30.6%。如果按理论来说，单机吞吐量应该能上涨 44%（Q1:Q2=T2:T1）。但实际压测发现，单机的吞吐量只上涨了20%。分析数据发现，加了 L2 缓存之后，多了两次 Redis 请求，Redis value 的序列化、反序列化消耗了额外的 CPU 资源。然后新增了 MinHash 向量计算、Jaccard 相似度计算等 CPU 密集型操作。这些导致单次请求响应时间变少了，但整体的 CPU 使用量上升了，最后导致压测时，CPU 变成了瓶颈，最后单机的吞吐量只比之前上涨了 20% 左右。
+L2 命中率历史记录约 38%，但现存材料无法确认分母是全部入口请求，还是 L1 未命中后到达 L2 的请求；前面的阈值表也存在此口径缺失，不能据此精确分解总体收益。重测时应分别记录 L2 条件命中率和入口贡献占比。
+
+召回阶段均值从 98 ms 降至 68 ms，复算下降 **30.61%**；整体均值从 198 ms 降至 108 ms，复算下降 **45.45%**。若假设 L1 命中率始终为 31%，仅余下 69% 的请求在召回上节省 30 ms，整体均值应由 141 ms 降至约 120.3 ms，而非直接得到 108 ms。额外差异可能来自排队、负载或统计范围变化，现存记录不足以归因。
+
+按 98/68−1 可算出约 44.12%，但只有固定并发、稳定负载等条件下，延迟倒数才能用于相应吞吐关系；它不是最大吞吐必然提升的比例。历史压测记录的单机吞吐提升约 20%。新增缓存访问、序列化和签名计算会增加 CPU 成本，是当时分析的可能瓶颈；应以相同硬件、负载和尾延迟约束下的压测来验证最大吞吐。
 
 ## 5. 总结
 
@@ -290,7 +348,7 @@ L1 缓存按突发峰值的 200万用户预留，L2 缓存 TTL 为 10 分钟，�
 1. 缓存分层设计，逐级优化链路响应时间。
 2. 两类不同的缓存，精准满足不同阶段的业务和性能要求。
 3. 缓存的参数选择需要在性能和推荐效果之间权衡。
-4. 中小团队直接使用 Redis 方案，大团队自研满足进一步需求。
+4. 按需求、收益和维护成本选择 Redis 封装或自研，团队规模不是唯一依据。
 5. 缓存优化带来的响应时间下降，并不一定等比例转化为吞吐量提升。
 
 整体而言，缓存是推荐系统（也是其他系统）的最基础，最具性价比的优化策略之一。分析好链路中的业务场景，不同场景使用不同优化方案，能达到性能和推荐效果的平衡。

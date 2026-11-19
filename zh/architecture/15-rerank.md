@@ -2,7 +2,7 @@
 
 ## 太长不看版
 
-精排是给候选打分，针对的是单条内容。重排的输入是候选列表、上下文和约束，输出最终的列表。它是列表级别的内容排列优化，构造一个兼顾业务规则和用户体验的最终展示列表。
+精排是给候选打分，针对的是单条内容。重排的输入是候选列表、上下文和约束，输出优化后的待分页批次。它通过列表级别的排列优化兼顾业务规则和用户体验；广告插入、分页和出口修复完成后，由 FinalizeResponse 确定最终下发列表。
 
 重排不是一个策略大全的堆砌，是有优先级的策略 Pipeline。有些策略属于硬约束（Hard Constraint），例如过滤、置顶、位置约束、配额下限等；有些策略属于软优化（Soft Optimization），例如多样性打散、形态分布、个性化匹配等。这些策略组织成 Pipeline 依次执行，各阶段维护自身约束，最后统一校验和修复，最终形成结果列表。
 
@@ -32,7 +32,7 @@
 
 ### 1.3 重排在链路中的位置
 
-回顾一下推荐漏斗：`海量内容池 -> 召回（约 1000 条候选）-> 精排（Top 200~300）-> 重排`，重排是漏斗最末端，是推荐链路最后的计算环节。
+回顾一下推荐漏斗：`海量内容池 -> 召回（约 1000 条候选）-> 精排（Top 200~300）-> 重排`，重排位于候选生成漏斗末端，是候选生成链路的最后一个主要列表优化阶段；后续仍有页面组装和统一出口校验。
 
 在工程上，重排表现为 Realtime Engine 的 Process Chain 中的一个或多个 Processor，运行在精排 Processor 之后。本文介绍的这些重排策略相对较轻，对上下文数据依赖比较强，因此内嵌在引擎中执行。如果重排的策略会采用列表级深度模型等计算密集型方法，可以拆分独立的重排服务，只需要把 Processor 从内嵌执行改成远程调用即可，对上下游透明。
 
@@ -50,7 +50,7 @@
 
 **输出：**
 
-- **最终列表**：经过重排之后的最终列表，我之前参与过的项目重排之后取 200 条写入缓存，供刷新和翻页使用。每一条内容包括最终位置、内容信息、重排信息等。
+- **批次候选列表**：项目中重排后取 200 条写入用户结果缓存，供本批次翻页使用；刷新可生成新批次。每条保存 generation_position（批次内位置）、内容和重排信息，以及生成请求和特征快照引用。这还不是广告插入、截页和出口修复后的最终展示列表，不能把批次内位置当作最终曝光位置。
 - **特征日志（Feature Log）**：重排阶段的处理日志，例如过滤原因、位置变化、配额满足情况、惩罚分数等。这些重排阶段数据和召回、精排等日志合并在一起存入 Data Warehouse，供离线训练和分析使用。
 
 ### 2.2 重排 Pipeline
@@ -71,7 +71,7 @@
 
 如前文所述，重排阶段有多重逻辑进行处理，这些逻辑的组织方式可以放在单个 Processor，也可以放在多个 Processor，对应的工程优劣也在 1.3 节说明。本文采取的是单 Processor 方式，即在 Process Chain 中只有一个 RerankProcessor，在内部组织多重策略的顺序执行。
 
-在 RerankProcessor 内部，所有的重排策略都实现同一个接口，核心代码如下：
+在 RerankProcessor 内部，所有的重排策略都实现同一个接口，以下使用示意接口描述状态提交和失败处理，不是可直接编译的完整实现：
 
 ```java
 public class RerankContext {
@@ -93,35 +93,51 @@ public class RerankProcessor extends Processor {
     public Response process(ExecutionContext executionContext) {
         Response response = callNextProcessor(executionContext);
 
+        if (!response.isSuccessful()) return response;
         List<RerankStrategy> strategies = executionContext.getRerankStrategies();
-        RerankContext rerankContext = buildRerankContext(executionContext, response.getResult());
+        RerankContext committed = buildRerankContext(executionContext, response.getResult());
 
         for (RerankStrategy strategy : strategies) {
-            if (!strategy.isEnabled(rerankContext)) {
-                continue;
+            if (!strategy.isEnabled(committed)) continue;
+            if (!executionContext.canRunPhase(strategy.getName())) {
+                executionContext.markSkipped(strategy.getName(), "budget");
+                continue; // 后续硬约束校验仍必须执行，不能因此宣告结果合格
             }
+            // 可变候选、Item 字段和 state 隔离；只读特征可共享
+            RerankContext trial = committed.forkMutableState();
             try {
-                strategy.apply(rerankContext);
+                strategy.apply(trial); // 长循环/RPC 内仍需真实预算控制
+                validateStructure(trial); // 重复 ID、空对象、来源完整性等
+                executionContext.requireActive(); // 拒绝超时后提交
+                committed = trial; // 全部成功后才提交
             } catch (Exception exception) {
-                log.error("rerank strategy [{}] failed", strategy.getName(), exception);
-                rerankContext.getFeatureLog().add(
-                    RerankLog.error(strategy.getName(), exception.getMessage())
-                );
+                executionContext.recordStrategyFailure(strategy.getName(), exception);
+                // trial 丢弃，保留上一份完整状态；catch 本身不提供回滚
             }
         }
 
-        new ConstraintValidator(rerankContext).validateAndRepair();
-
-        executionContext.addFeatureLog("rerank", rerankContext.getFeatureLog());
-        response.setResult(rerankContext.getCandidates());
-        return response;
+        try {
+            RerankContext checked = committed.forkMutableState();
+            ValidationResult result = new ConstraintValidator(checked)
+                .validateAndRepair(executionContext.validationBudget());
+            if (!result.safetyConfirmed() || !result.allRequiredConstraintsSatisfied()) {
+                return ResponseBuilder.buildErrorResponse("Rerank constraints unresolved");
+            }
+            executionContext.addFeatureLog("rerank", checked.getFeatureLog());
+            return response.withResult(checked.getCandidates());
+        } catch (Exception exception) {
+            executionContext.recordValidationFailure(exception);
+            return ResponseBuilder.buildErrorResponse("Rerank validation failed");
+        }
     }
 }
 ```
 
-其中候选列表是可变列表，顺序传递给各策略对象。重排策略可以直接操作该列表，例如过滤直接移除、混排/多样性调整顺序。在请求内独占候选列表和上下文的前提下，策略顺序执行，不涉及这些状态的并发修改。`RerankContext` 设置 `RerankState`，一些跨策略的状态可以暂存在该对象中。策略列表通过配置指定，请求到达、构建 `ExecutionContext` 时，会根据配置构建对应的策略对象列表。
+示例使用“修改后提交”：各策略只修改独占的试算状态，成功后替换已提交状态；异常则丢弃试算结果。forkMutableState 不能只是复制 List，若 Item 内字段、Map 或跨策略 state 可变，也要深拷贝或 copy-on-write。可以采用其他等价的撤销方案，不要求每步复制全部只读特征。策略不得对共享缓存对象原地修改，也不应有无法撤销的外部副作用。成功策略的日志随状态提交，失败日志单独记录。
 
-上面代码展示了异常隔离结构，但捕获异常不等于忽略失败：多样性等软优化失败可以跳过；安全合规等硬约束策略失败，还会继续执行到最终校验，确认约束是否成立，否则触发降级或兜底。`ConstraintValidator` 的执行如果失败，记录错误日志后，可以根据业务需要或直接放行，或者抛出错误触发上层降级（见 7.3 节）。
+策略和规则来自请求入口固定的不可变配置快照。多样性等软策略失败可保留前一状态，但必须继续硬约束校验。安全检查失败或未知时，不允许直接放行；显式失败交给统一出口，尝试已确认有效的兜底，或少返回/空返回。只有预先声明可放宽的业务约束，且安全校验成功后，才可带降级标记返回；validator 应把放宽项、原因与剩余必需约束明确返回，不能把异常当成可放宽的业务冲突。
+
+ConstraintValidator 自身的修复也在隔离状态上进行并受预算限制。校验失败不能输出部分修复的列表。以上代码负责批次重排；分页、广告和运营插入之后，还必须经过架构第 12 篇第 7 节定义的 FinalizeResponse，对实际页面重新校验并记录 Delivery Log。缓存命中和上层兜底都不能绕过这个出口。
 
 ### 2.4 硬约束和软优化
 
@@ -133,13 +149,24 @@ public class RerankProcessor extends Processor {
 
 因此，重排 Pipeline 的设计，就是把硬约束尽量提前（过滤、配额），软优化策略放中间（多样性），运营干预放在软优化之后，再由最终校验守住安全合规等硬约束。
 
+每条约束还需声明作用域与计数口径，不能只写一个比例或位置：
+
+| 作用域 | 示例与含义 |
+| --- | --- |
+| 整批候选 | 200 条缓存候选的总体多样性或配额，不能推导每页都满足 |
+| 当前页/首屏 | 本次实际下发页中的前 N 位、视频和质量配额，明确是否包含广告卡片 |
+| 会话 | 同会话的运营插入次数、作者累计频次 |
+| 跨页滑动窗口 | 上一页尾部与本页开头合起来检查连续重复、多样性 |
+
+本文首屏指客户端本次页面起始可见区域，而非永远指缓存批次前 10 条；下拉刷新与继续翻页需显式区分。比如当前页有 20 个自然内容位，视频下限 10% 意味着至少 2 条视频，不能用整批 20 条视频来替代。若广告占用固定页长，分母、自然内容位数和取整规则必须重算。跨页检查读取已提交页面/有效曝光历史及其版本，并明确两种历史的用途，不能把已下发当成已曝光。
+
 ### 2.5 配置、实验和 Feature Log
 
 **配置**：所有策略的开关和参数（惩罚系数、配额比例、过滤阈值等）都通过配置中心来管理，支持按场景和实验来设置不同值。配置变更支持热更新，可在不重启服务情况下应用新设置。
 
 **A/B Test**：重排策略的调整，包括新增加策略、修改参数、调整 Pipeline 顺序，都应该通过 A/B Test 来验证，对比最终的业务指标和生态指标，来确定哪些策略和参数应该应用在全流量中。
 
-**Feature Log**：重排阶段也是对用户结果的优化过程，因此在这个阶段做的所有调整都需要记录在 Feature Log 中，包括：被过滤的原因、原始位置和最终位置、配额满足情况、多样性惩罚分数、运营干预标记等等。这些日志可用于离线分析策略效果，也可以用于将来列表级模型的训练样本生成。
+**Feature Log**：重排阶段也是对用户结果的优化过程，因此在这个阶段做的所有调整都需要记录在 Feature Log 中，包括：被过滤的原因、精排位置和重排后的 generation_position、约束作用域及配额满足情况、多样性惩罚分数、运营干预标记等等。这些日志可用于离线分析策略效果，也可以用于将来列表级模型的训练样本生成。
 
 ## 3. 过滤和去重
 
@@ -354,7 +381,7 @@ $$
 
 Pipeline 中每个策略都可能破坏其他策略的约束，例如多样性打散可能把低俗内容移到首屏。因此在 Pipeline 末尾，需要统一进行校验修复。
 
-校验：对最终列表做全量的硬约束检查：
+校验：按约束作用域检查批次或当前页面，覆盖对象完整性、来源标识，以及以下硬约束：
 
 - 过滤检查：是否有违规内容、已读内容残留；
 - 位置检查：首屏是否有低俗内容；
@@ -368,6 +395,8 @@ Pipeline 中每个策略都可能破坏其他策略的约束，例如多样性�
 - 符合安全合规要求的置顶内容如果偏离指定位置，需要移回，并复查受影响的位置和配额；
 
 修复后需要复查受影响的约束，并限制修复轮数，避免策略之间反复拉扯。硬约束无法同时满足时，按优先级取舍或触发降级；安全合规约束无法确认满足时，不能直接输出。已经进行的修复、因冲突而放宽的业务约束，以及降级结果，都需要记录日志并配置告警。
+
+分页截尾、广告/运营插入、缓存读取后的最新屏蔽，都可能再次改变展示集合或位置。因此，批次校验通过只表示该阶段合格，最终出口仍需对实际页复查；补齐候选也必须经过同样检查，并限制补齐轮数和耗时。Renderer 不再改变顺序与集合；若下游必须改变布局，则由负责最终布局的模块重新检查并记录最终位置。
 
 本文 2.3 中由独立的 `ConstraintValidator` 完成校验和修复，约束参数应与前序策略使用同一份请求配置，避免两套规则不一致。也可以把校验修复实现为一个 RerankStrategy，但必须保证它最终执行，且校验失败不能被通用异常隔离逻辑简单跳过。做 A/B Test 时，业务约束可按实验配置变化，安全合规底线不能随实验关闭。
 
@@ -427,7 +456,7 @@ Pipeline 中每个策略都可能破坏其他策略的约束，例如多样性�
 
 重排是一个约束驱动的列表级优化构造过程，精排给出候选列表和每条内容的分数和多目标预估值，而重排是结合上下文和约束条件，在按优先级处理硬约束冲突、守住安全合规底线的前提下优化软目标，输出最终列表。
 
-回顾本文，单条打分到列表级优化是精排到重排的基础范式变化；硬约束、软优化分类是策略核心；过滤、配额、多样性、运营干预是四类典型的策略。最后可以一句话总结：重排本质上是把精排计算的优质候选集，在多重硬约束下，通过软优化手段，构造一个既能满足业务规则又兼顾用户体验的最终展示列表。
+回顾本文，单条打分到列表级优化是精排到重排的基础范式变化；硬约束、软优化分类是策略核心；过滤、配额、多样性、运营干预是四类典型的策略。最后可以一句话总结：重排本质上是把精排计算的优质候选集，在多重硬约束下，通过软优化手段，构造一个兼顾业务规则和用户体验的待分页批次；最终下发列表还需经过页面组装与 FinalizeResponse 校验。
 
 ---
 ## 附录：实战思考题
