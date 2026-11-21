@@ -1,0 +1,2 @@
+# PDF only; HTML conversion needs only Python and Pandoc.
+playwright>=1.49,<2
