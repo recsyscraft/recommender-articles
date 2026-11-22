@@ -36,11 +36,16 @@ Start with the [Chinese reading guide](./zh/README.md) or browse the [English tr
 ├── assets/
 │   ├── architecture/        ← Images & diagrams
 │   └── engineering/
+├── tools/                   ← Markdown to HTML/PDF exporter
 ├── LICENSE-CC-BY-4.0        ← License for articles, images & diagrams
-└── LICENSE-MIT              ← License for source code (if any)
+└── LICENSE-MIT              ← License for tool scripts & styles
 ```
 
 The English directory currently holds the translation of article 01; the remaining folders and files will appear in Git as translations are added.
+
+## Tools
+
+Export individual Markdown articles or entire directories to HTML and PDF with the cross-platform utility in [`tools/`](./tools/README.md). See its README for installation and usage instructions.
 
 ## License
 
@@ -53,7 +58,7 @@ This repository applies different licenses for **article content** and **source 
 
   > You are free to share, adapt, and use these works for commercial purposes, as long as appropriate attribution is given.
 
-- **Sample scripts, utility source code** (if any):
+- **Tool scripts, styles and other source code** (under `tools/`):
   Licensed under the [MIT License](https://opensource.org/licenses/MIT).
   See [`LICENSE-MIT`](./LICENSE-MIT).
 
